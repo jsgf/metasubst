@@ -43,6 +43,15 @@ fn missing() {
         })
     );
 }
+#[test]
+fn emptystr() {
+    let mapping = hashmap! {
+        "foo" => "FOO",
+        "bar" => "rab",
+    };
+
+    assert_eq!(subst("", &mapping).unwrap(), "");
+}
 
 #[test]
 fn incomplete() {
@@ -56,6 +65,22 @@ fn incomplete() {
         Err(Error::ShortInput {
             result: "my FOO is ".to_string(),
             state: r#"Var("bar")"#.to_string(),
+        })
+    );
+}
+
+#[test]
+fn incomplete_open() {
+    let mapping = hashmap! {
+        "foo" => "FOO",
+        "bar" => "rab",
+    };
+
+    assert_eq!(
+        subst("my {foo} is {", &mapping),
+        Err(Error::ShortInput {
+            result: "my FOO is ".to_string(),
+            state: r#"(Text, Var(""))"#.to_string(),
         })
     );
 }

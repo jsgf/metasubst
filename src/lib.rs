@@ -53,10 +53,11 @@ where
     }
 }
 
-impl<'a: 'v, 'v, K, V, S: BuildHasher> Substitute<'v> for &'a HashMap<K, V, S>
+impl<'a: 'v, 'v, K, V, S> Substitute<'v> for &'a HashMap<K, V, S>
 where
     K: Eq + Hash + Borrow<str>,
     V: AsRef<str> + 'v,
+    S: BuildHasher,
 {
     fn subst(&self, key: &str) -> Option<&'v str> {
         self.get(key).map(|v| v.as_ref())
@@ -104,11 +105,23 @@ fn extend_params(params: &mut Vec<String>, c: char) {
 /// found by calling `subst.subst("variable")`. If no substitution is found, then
 /// the variable is replaced with an empty string, and the missing name noted.
 ///
+/// For example:
+/// ```rust
+/// # use metasubst::subst;
+/// let map = maplit::hashmap! {
+///     "foo" => "FOO",
+///     "bar" => "blacksheep",
+/// };
+///
+/// let out = subst("bar bar {bar}", &map).unwrap();
+/// assert_eq!(out, "bar bar blacksheep");
+/// ```
+///
 /// On success, it returns a new `String` with all the substitutions. If any
 /// substitutions are missing, it returns an error with the final formatted string,
 /// and all the missing variables.
 ///
-/// Substitutions can also have parameters - `{variable:param1,param3}`. Parameters
+/// Substitutions can also have parameters, such as `{variable:param1,param3}`. Parameters
 /// are separated with `,`, but otherwise have no defined syntax. They are passed to
 /// `Substitute::subst_param` which can apply any interpretation to the parameters
 /// as it wants. It may also return errors if there's something wrong with the parameters.
@@ -140,7 +153,7 @@ where
         Text,
         /// Accumulating variable name
         Var(String),
-        /// Accumulating (skipping) parameters
+        /// Accumulating parameters
         Param(String, Vec<String>),
     }
     use BaseState::*;
@@ -294,12 +307,15 @@ where
         }
     }
 
+    // Finalize state
     match state {
         Quote { prev, next, .. } => match (prev, next) {
+            // Pending var substitution
             (Var(var), Text) => match subst.subst(&var) {
                 Some(s) => res.push_str(&Cow::from(s)),
                 None => missing.push(var.to_string()),
             },
+            // Pending substitution with params
             (Param(var, params), Text) => {
                 match subst.subst_params(&var, &params).map_err(Error::Subst)? {
                     Some(s) => res.push_str(&Cow::from(s)),
@@ -319,7 +335,7 @@ where
                 state: format!("{:?}", st),
             })
         }
-        Base(Text) => (),
+        Base(Text) => {}
     };
 
     if missing.is_empty() {
