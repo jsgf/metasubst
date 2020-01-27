@@ -1,3 +1,9 @@
+//! Expand variables in a string
+//!
+//! This crate exposes a single function - `subst` - which takes a string format and
+//! expands any variable references in it. It consults an implementation of the `Substitute`
+//! trait to find the expansions. By default this is implemented for `HashMap` and `BTreeMap`,
+//! and for closures.
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::error;
@@ -5,29 +11,42 @@ use std::error;
 #[cfg(test)]
 mod test;
 
+/// Error type.
 #[derive(Debug, Clone, thiserror::Error, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Error<E: error::Error> {
+pub enum Error<E: error::Error + 'static> {
+    /// Format string has a syntax error
     #[error("malformed format string: {0}")]
     BadFormat(String),
+    /// Some substitutions were missing. The partial result is returned (missing substitutions
+    /// are replaced with empty strings).
     #[error("missing keys in substitution: {missing:?}")]
     MissingKeys {
         result: String,
         missing: Vec<String>,
     },
+    /// Input string was truncated in the middle of something (either in the middle of a
+    /// variable or a quote).
     #[error("input string too short: {state}")]
     ShortInput { result: String, state: String },
+    /// Substitution returned an error.
     #[error("substitution error: {0}")]
-    Subst(E),
+    Subst(#[source] E),
 }
 
+/// Error type for infallable substitutions
 #[derive(Copy, Clone, Debug, thiserror::Error, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Void {}
 
+/// Define substitutions for references in a format string.
 pub trait Substitute<'a, R = &'a str, E = Void>
 where
     Cow<'a, str>: From<R>,
 {
+    /// Simple substitution without parameters. The assumption is that this can't fail.
     fn subst(&self, key: &str) -> Option<R>;
+
+    /// Substitution with parameters. This can fail if the parameters are wrong for
+    /// a given implementation.
     fn subst_params(&self, key: &str, _params: &[String]) -> Result<Option<R>, E> {
         Ok(self.subst(key))
     }
@@ -83,6 +102,19 @@ fn extend_params(params: &mut Vec<String>, c: char) {
     }
 }
 
+/// Given an input string, substitute values for any reference in the input.
+/// The simplest form is just a variable name: `{variable}`. A substitution is
+/// found by calling `subst.subst("variable")`. If no substitution is found, then
+/// the variable is replaced with an empty string, and the missing name noted.
+///
+/// On success, it returns a new `String` with all the substitutions. If any
+/// substitutions are missing, it returns an error with the final formatted string,
+/// and all the missing variables.
+///
+/// Substitutions can also have parameters - `{variable:param1,param3}`. Parameters
+/// are separated with `,`, but otherwise have no defined syntax. They are passed to
+/// `Substitute::subst_param` which can apply any interpretation to the parameters
+/// as it wants. It may also return errors if there's something wrong with the parameters.
 pub fn subst<'a, S, M, R, E>(input: S, subst: M) -> Result<String, Error<E>>
 where
     S: AsRef<str>,
@@ -256,8 +288,8 @@ where
         }
     }
 
-    if let Quote { prev, next, .. } = state {
-        match (*prev, *next) {
+    match state {
+        Quote { prev, next, .. } => match (*prev, *next) {
             (Var(var), Text) => match subst.subst(&var) {
                 Some(s) => res.push_str(&Cow::from(s)),
                 None => missing.push(var.to_string()),
@@ -274,8 +306,15 @@ where
                     state: format!("{:?}", short),
                 })
             }
+        },
+        st @ Var(_) | st @ Param(..) => {
+            return Err(Error::ShortInput {
+                result: res,
+                state: format!("{:?}", st),
+            })
         }
-    }
+        Text => (),
+    };
 
     if missing.is_empty() {
         Ok(res)

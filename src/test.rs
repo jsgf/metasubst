@@ -51,7 +51,29 @@ fn incomplete() {
         "bar" => "rab",
     };
 
-    assert_eq!(subst("my {foo} is {bar", &mapping).unwrap(), "my FOO is ");
+    assert_eq!(
+        subst("my {foo} is {bar", &mapping),
+        Err(Error::ShortInput {
+            result: "my FOO is ".to_string(),
+            state: r#"Var("bar")"#.to_string(),
+        })
+    );
+}
+
+#[test]
+fn incomplete_params() {
+    let mapping = hashmap! {
+        "foo" => "FOO",
+        "bar" => "rab",
+    };
+
+    assert_eq!(
+        subst("my {foo} is {bar:1", &mapping),
+        Err(Error::ShortInput {
+            result: "my FOO is ".to_string(),
+            state: r#"Param("bar", ["1"])"#.to_string(),
+        })
+    );
 }
 
 #[test]
