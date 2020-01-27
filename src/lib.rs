@@ -4,9 +4,10 @@
 //! expands any variable references in it. It consults an implementation of the `Substitute`
 //! trait to find the expansions. By default this is implemented for `HashMap` and `BTreeMap`,
 //! and for closures.
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, HashMap};
 use std::error;
+use std::hash::Hash;
 
 #[cfg(test)]
 mod test;
@@ -52,27 +53,23 @@ where
     }
 }
 
-impl<'a> Substitute<'a> for &'a HashMap<String, String> {
-    fn subst(&self, key: &str) -> Option<&'a str> {
-        self.get(key).map(String::as_str)
-    }
-}
-
-impl<'a, 'v> Substitute<'v> for &'a HashMap<&'a str, &'v str> {
+impl<'a: 'v, 'v, K, V> Substitute<'v> for &'a HashMap<K, V>
+where
+    K: Eq + Hash + Borrow<str>,
+    V: AsRef<str> + 'v
+{
     fn subst(&self, key: &str) -> Option<&'v str> {
-        self.get(key).copied()
+        self.get(key).map(|v| v.as_ref())
     }
 }
 
-impl<'a> Substitute<'a> for &'a BTreeMap<String, String> {
-    fn subst(&self, key: &str) -> Option<&'a str> {
-        self.get(key).map(String::as_str)
-    }
-}
-
-impl<'a, 'v> Substitute<'v> for &'a BTreeMap<&'a str, &'v str> {
+impl<'a: 'v, 'v, K, V> Substitute<'v> for &'a BTreeMap<K, V>
+where
+    K: Eq + Ord + Borrow<str>,
+    V: AsRef<str> + 'v
+{
     fn subst(&self, key: &str) -> Option<&'v str> {
-        self.get(key).copied()
+        self.get(key).map(|v| v.as_ref())
     }
 }
 
