@@ -7,7 +7,7 @@
 use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, HashMap};
 use std::error;
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 
 #[cfg(test)]
 mod test;
@@ -53,10 +53,10 @@ where
     }
 }
 
-impl<'a: 'v, 'v, K, V> Substitute<'v> for &'a HashMap<K, V>
+impl<'a: 'v, 'v, K, V, S: BuildHasher> Substitute<'v> for &'a HashMap<K, V, S>
 where
     K: Eq + Hash + Borrow<str>,
-    V: AsRef<str> + 'v
+    V: AsRef<str> + 'v,
 {
     fn subst(&self, key: &str) -> Option<&'v str> {
         self.get(key).map(|v| v.as_ref())
@@ -66,7 +66,7 @@ where
 impl<'a: 'v, 'v, K, V> Substitute<'v> for &'a BTreeMap<K, V>
 where
     K: Eq + Ord + Borrow<str>,
-    V: AsRef<str> + 'v
+    V: AsRef<str> + 'v,
 {
     fn subst(&self, key: &str) -> Option<&'v str> {
         self.get(key).map(|v| v.as_ref())
@@ -125,168 +125,177 @@ where
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum State {
-        /// Main string body
-        Text,
+        Base(BaseState),
         /// A possible quote (repeated metacharacter) with next or prev state
         Quote {
             quote: char,
-            prev: Box<State>,
-            next: Box<State>,
+            prev: BaseState,
+            next: BaseState,
         },
+    }
+    use State::*;
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum BaseState {
+        /// Main string body
+        Text,
         /// Accumulating variable name
         Var(String),
         /// Accumulating (skipping) parameters
         Param(String, Vec<String>),
     }
-    use State::*;
+    use BaseState::*;
 
-    let mut state = Text;
+    let mut state = Base(Text);
 
     for c in input.chars() {
         state = match (state, c) {
-            (st @ Text, '{') => Quote {
+            (Base(st @ Text), '{') => Quote {
                 quote: c,
-                prev: Box::new(st),
-                next: Box::new(Var(String::new())),
+                prev: st,
+                next: Var(String::new()),
             },
-            (Text, '}') => Quote {
+            (Base(Text), '}') => Quote {
                 // handle }} after {{
                 quote: c,
-                prev: Box::new(Text),
-                next: Box::new(Text),
+                prev: Text,
+                next: Text,
             },
-            (st @ Text, c) => {
+            (st @ Base(Text), c) => {
                 res.push(c);
                 st
             }
-            (Quote { quote, next, prev }, c) => {
-                if c != quote {
-                    // Not doubled so not quoted. Consume the metacharacter and use the current character for something
-                    match (c, *prev, *next) {
-                        // General `}` on var or param
-                        (c, Var(var), Text) => {
-                            match subst.subst(&var) {
-                                Some(s) => res.push_str(&Cow::from(s)),
-                                None => missing.push(var.to_string()),
-                            }
-                            res.push(c);
-                            Text
-                        }
-                        (c, Param(var, params), Text) => {
-                            match subst
-                                .subst_params(&var, &params)
-                                .map_err(Error::<E>::Subst)?
-                            {
-                                Some(s) => res.push_str(&Cow::from(s)),
-                                None => missing.push(var.to_string()),
-                            }
-                            res.push(c);
-                            Text
-                        }
-                        // `}` after empty param
-                        ('}', Var(var), Param(_, params)) => Quote {
-                            quote: c,
-                            prev: Box::new(Param(var, params)),
-                            next: Box::new(Text),
-                        },
-                        // general param after `:`
-                        (_, Var(var), Param(_, mut params)) => {
-                            extend_params(&mut params, c);
-                            Param(var, params)
-                        }
-                        // `}` after empty var
-                        ('}', Text, st @ Var(_)) => Quote {
-                            quote: c,
-                            prev: Box::new(st),
-                            next: Box::new(Text),
-                        },
-                        // `:` after empty var
-                        (':', Text, Var(var)) => Quote {
-                            quote: ':',
-                            prev: Box::new(Var(var.clone())),
-                            next: Box::new(Param(var, vec![])),
-                        },
-                        // `{` to start var
-                        (c, Text, Var(mut var)) => {
-                            var.push(c);
-                            Var(var)
-                        }
-                        // `,` to add param
-                        (',', Param(_var, _params), Param(var, mut params)) => {
-                            params.push(String::new());
-                            Param(var, params)
-                        }
-                        // add char to param
-                        (c, Param(_var, _params), Param(var, mut params)) => {
-                            extend_params(&mut params, c);
-                            Param(var, params)
-                        }
-                        // Syntax errors
-                        (_, Var(_), Var(_))  // "{ {x"
-                        | (_, Text, Text)  // "}x"
-                            => return Err(Error::BadFormat(input.to_string())),
-
-                        // Unreachable transitions
-                        (_, prev @ Quote { .. }, next)
-                        | (_, prev, next @ Quote { .. })
-                        | (_, prev @ Text, next @ Param { .. })
-                        | (_, prev @ Param(_, _), next @ Var(_)) => panic!(
-                            "Bad transition: c = {:?} prev {:?} next {:?}",
-                            c, prev, next
-                        ),
-                    }
-                } else {
-                    let mut prev = *prev;
-                    match &mut prev {
-                        Text => res.push(c),
-                        Var(ref mut var) => var.push(c),
-                        Param(_var, ref mut params) => extend_params(params, c),
-                        Quote { .. } => panic!("Quote in Quote"),
-                    };
-                    prev
-                }
-            }
-            (Var(var), ':') => Quote {
+            (Base(Var(var)), ':') => Quote {
                 quote: ':',
-                prev: Box::new(Var(var.clone())),
-                next: Box::new(Param(var, vec![])),
+                prev: Var(var.clone()),
+                next: Param(var, vec![]),
             },
-            (st @ Var(_), '}') | (st @ Param(_, _), '}') => Quote {
+            (Base(st @ Var(_)), '}') | (Base(st @ Param(_, _)), '}') => Quote {
                 quote: c,
-                prev: Box::new(st),
-                next: Box::new(Text),
+                prev: st,
+                next: Text,
             },
-            (st @ Var(_), '{') | (st @ Param(_, _), '{') => Quote {
+            (Base(st @ Var(_)), '{') | (Base(st @ Param(_, _)), '{') => Quote {
                 quote: c,
-                prev: Box::new(st.clone()),
-                next: Box::new(st),
+                prev: st.clone(),
+                next: st,
             },
-            (Var(mut var), c) => {
+            (Base(Var(mut var)), c) => {
                 var.push(c);
-                Var(var)
+                Base(Var(var))
             }
-            (Param(var, mut params), ',') => Quote {
+            (Base(Param(var, mut params)), ',') => Quote {
                 quote: ',',
-                prev: Box::new(Param(var.clone(), params.clone())),
+                prev: (Param(var.clone(), params.clone())),
                 next: {
                     params.push(String::new());
-                    Box::new(Param(var, params))
+                    (Param(var, params))
                 },
             },
-            (st @ Param(_, _), ':') => Quote {
+            (Base(st @ Param(_, _)), ':') => Quote {
                 quote: ':',
-                prev: Box::new(st.clone()),
-                next: Box::new(st),
+                prev: st.clone(),
+                next: st,
             },
-            (Param(var, mut params), c) => {
+            (Base(Param(var, mut params)), c) => {
                 extend_params(&mut params, c);
-                Param(var, params)
+                Base(Param(var, params))
+            }
+            (
+                Quote {
+                    quote, mut prev, ..
+                },
+                c,
+            ) if c == quote => {
+                // Repeated meta-character = quoted. Emit metacharacter and
+                // return to previous state.
+                match &mut prev {
+                    Text => res.push(c),
+                    Var(ref mut var) => var.push(c),
+                    Param(_var, ref mut params) => extend_params(params, c),
+                };
+                Base(prev)
+            }
+            (Quote { prev, next, .. }, c) => {
+                // Not doubled so not quoted.
+                // Consume the metacharacter, move to the next state, and apply
+                // current character to that state.
+                match (c, prev, next) {
+                    // General `}` on var or param
+                    (c, Var(var), Text) => {
+                        match subst.subst(&var) {
+                            Some(s) => res.push_str(&Cow::from(s)),
+                            None => missing.push(var.to_string()),
+                        }
+                        res.push(c);
+                        Base(Text)
+                    }
+                    (c, Param(var, params), Text) => {
+                        match subst
+                            .subst_params(&var, &params)
+                            .map_err(Error::<E>::Subst)?
+                        {
+                            Some(s) => res.push_str(&Cow::from(s)),
+                            None => missing.push(var.to_string()),
+                        }
+                        res.push(c);
+                        Base(Text)
+                    }
+                    // `}` after empty param
+                    ('}', Var(var), Param(_, params)) => Quote {
+                        quote: c,
+                        prev: Param(var, params),
+                        next: Text,
+                    },
+                    // general param after `:`
+                    (_, Var(var), Param(_, mut params)) => {
+                        extend_params(&mut params, c);
+                        Base(Param(var, params))
+                    }
+                    // `}` after empty var
+                    ('}', Text, st @ Var(_)) => Quote {
+                        quote: c,
+                        prev: st,
+                        next: Text,
+                    },
+                    // `:` after empty var
+                    (':', Text, Var(var)) => Quote {
+                        quote: ':',
+                        prev: Var(var.clone()),
+                        next: Param(var, vec![]),
+                    },
+                    // `{` to start var
+                    (c, Text, Var(mut var)) => {
+                        var.push(c);
+                        Base(Var(var))
+                    }
+                    // `,` to add param
+                    (',', Param(_var, _params), Param(var, mut params)) => {
+                        params.push(String::new());
+                        Base(Param(var, params))
+                    }
+                    // add char to param
+                    (c, Param(_var, _params), Param(var, mut params)) => {
+                        extend_params(&mut params, c);
+                        Base(Param(var, params))
+                    }
+                    // Syntax errors
+                    (_, Var(_), Var(_))  // "{ {x"
+                    | (_, Text, Text)  // "}x"
+                        => return Err(Error::BadFormat(input.to_string())),
+
+                    // Unreachable transitions
+                    (_, prev @ Text, next @ Param { .. })
+                    | (_, prev @ Param(_, _), next @ Var(_)) => panic!(
+                        "Bad transition: c = {:?} prev {:?} next {:?}",
+                        c, prev, next
+                    ),
+                }
             }
         }
     }
 
     match state {
-        Quote { prev, next, .. } => match (*prev, *next) {
+        Quote { prev, next, .. } => match (prev, next) {
             (Var(var), Text) => match subst.subst(&var) {
                 Some(s) => res.push_str(&Cow::from(s)),
                 None => missing.push(var.to_string()),
@@ -304,13 +313,13 @@ where
                 })
             }
         },
-        st @ Var(_) | st @ Param(..) => {
+        Base(st @ Var(_)) | Base(st @ Param(..)) => {
             return Err(Error::ShortInput {
                 result: res,
                 state: format!("{:?}", st),
             })
         }
-        Text => (),
+        Base(Text) => (),
     };
 
     if missing.is_empty() {
